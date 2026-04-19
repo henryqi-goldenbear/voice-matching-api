@@ -1,9 +1,10 @@
 package com.voicematch.service;
 
-import com.voicematch.model.*;
-import com.voicematch.repository.*;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import com.henryqi.voicematching.model.*;
+import com.henryqi.voicematching.repository.*;
+import com.henryqi.voicematching.dto.AiExtraction;
+import com.henryqi.voicematching.dto.VoiceResponse;
+import com.henryqi.voicematching.service.ExternalAiService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -31,18 +32,33 @@ import java.util.concurrent.*;
  *    the WebFlux learning curve.
  *  - HikariCP pool (configured in application.yml) saturates DB bandwidth.
  */
-@Slf4j
 @Service
-@RequiredArgsConstructor
 public class VoicePipelineService {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(VoicePipelineService.class);
 
     private final ElevenLabsService elevenLabsService;
-    private final AiExtractionService aiExtractionService;
+    private final ExternalAiService externalAiService;
     private final ProfileRepository profileRepository;
     private final VoiceSessionRepository sessionRepository;
     private final ExperienceRepository experienceRepository;
     private final CircleRepository circleRepository;
     private final MatchRepository matchRepository;
+
+    public VoicePipelineService(ElevenLabsService elevenLabsService,
+                                ExternalAiService externalAiService,
+                                ProfileRepository profileRepository,
+                                VoiceSessionRepository sessionRepository,
+                                ExperienceRepository experienceRepository,
+                                CircleRepository circleRepository,
+                                MatchRepository matchRepository) {
+        this.elevenLabsService = elevenLabsService;
+        this.externalAiService = externalAiService;
+        this.profileRepository = profileRepository;
+        this.sessionRepository = sessionRepository;
+        this.experienceRepository = experienceRepository;
+        this.circleRepository = circleRepository;
+        this.matchRepository = matchRepository;
+    }
 
     @Value("${elevenlabs.api-key:}")
     private String elevenLabsApiKey;
@@ -52,7 +68,7 @@ public class VoicePipelineService {
      * Returns a VoicePipelineResult containing the extracted state,
      * the saved match, and the matched experience.
      */
-    public VoicePipelineResult process(String profileId,
+    public VoiceResponse process(String profileId,
                                        String voiceAudioBase64,
                                        String transcript) throws Exception {
 
@@ -70,56 +86,65 @@ public class VoicePipelineService {
 
         // --- Step 2: AI extraction ---
         long aiStart = System.currentTimeMillis();
-        AiExtraction extracted = aiExtractionService.extract(finalTranscript);
+        AiExtraction extracted = externalAiService.extractProfileFromVoice(finalTranscript).join();
         log.info("[AI] extraction done in {}ms", System.currentTimeMillis() - aiStart);
 
         // --- Step 3: Parallel DB writes (session log + profile update) ---
         String tx = finalTranscript;
         CompletableFuture<Void> sessionFuture = CompletableFuture.runAsync(() -> {
-            VoiceSession session = VoiceSession.builder()
-                    .profileId(profileId)
-                    .transcript(tx)
-                    .extractedEmotion(extracted.emotionalState())
-                    .extractedChapter(extracted.lifeChapter())
-                    .extractedEnergy(extracted.socialEnergy())
-                    .createdAt(Instant.now())
-                    .build();
+            VoiceSession session = new VoiceSession();
+            try {
+                session.setProfileId(Long.parseLong(profileId));
+            } catch (Exception ignored) {}
+            session.setTranscript(tx);
+            session.setExtractedEmotion(extracted.getEmotionalState());
+            session.setExtractedChapter(extracted.getLifeChapter());
+            session.setExtractedEnergy(extracted.getSocialEnergy());
             sessionRepository.save(session);
         });
 
-        CompletableFuture<Void> profileFuture = CompletableFuture.runAsync(() ->
-                profileRepository.updateExtractedState(
-                        profileId,
-                        extracted.emotionalState(),
-                        extracted.lifeChapter(),
-                        extracted.socialEnergy(),
-                        Instant.now()));
+        CompletableFuture<Void> profileFuture = CompletableFuture.runAsync(() -> {
+            try {
+                Long pid = Long.parseLong(profileId);
+                profileRepository.findById(pid).ifPresent(p -> {
+                    p.setCurrentEmotionalState(extracted.getEmotionalState());
+                    p.setCurrentLifeChapter(extracted.getLifeChapter());
+                    p.setCurrentSocialEnergy(extracted.getSocialEnergy());
+                    p.setLastCheckIn(java.time.OffsetDateTime.now());
+                    profileRepository.save(p);
+                });
+            } catch (Exception ignored) {}
+        });
 
         // Fire both writes, wait for both — but don't block the match logic yet
         CompletableFuture<Void> writesAll = CompletableFuture.allOf(sessionFuture, profileFuture);
 
         // --- Step 4: Experience matching (runs while DB writes are in flight) ---
         String containerType = resolveContainerType(extracted.socialEnergy());
-        Experience best = experienceRepository.findFirstByContainerType(containerType)
-                .orElseThrow(() -> new NoSuchElementException("No experience available"));
+        Experience best = Optional.ofNullable(experienceRepository.findTopByContainerType(containerType))
+            .orElseThrow(() -> new NoSuchElementException("No experience available"));
 
-        Circle circle = circleRepository
-                .findFirstByExperienceIdAndStatus(best.getId(), "pending")
-                .orElseGet(() -> circleRepository.save(
-                        Circle.builder().experienceId(best.getId()).status("pending").build()));
+        Circle circle = Optional.ofNullable(circleRepository.findPendingByExperienceId(best.getId()))
+            .orElseGet(() -> {
+                Circle c = new Circle();
+                c.setExperienceId(best.getId());
+                c.setStatus("pending");
+                return circleRepository.save(c);
+            });
 
-        Match match = matchRepository.upsert(
-                profileId,
-                circle.getId(),
-                "invited",
-                String.format("This %s event matches your %s state.",
-                        best.getContainerType(), extracted.emotionalState()));
+        MatchRecord match = new MatchRecord();
+        try { match.setProfileId(Long.parseLong(profileId)); } catch (Exception ignored) {}
+        match.setCircleId(circle.getId());
+        match.setStatus("invited");
+        match.setMatchReason(String.format("This %s event matches your %s state.",
+            best.getContainerType(), extracted.getEmotionalState()));
+        MatchRecord savedMatch = matchRepository.save(match);
 
         // Ensure writes completed before returning
         writesAll.get(5, TimeUnit.SECONDS);
 
         log.info("[PIPELINE] total={}ms profileId={}", System.currentTimeMillis() - start, profileId);
-        return new VoicePipelineResult(extracted, match, best);
+        return new VoiceResponse("ok", extracted, savedMatch, best);
     }
 
     private String resolveContainerType(String socialEnergy) {

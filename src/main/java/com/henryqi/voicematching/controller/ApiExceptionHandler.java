@@ -15,7 +15,7 @@ public class ApiExceptionHandler {
     @ExceptionHandler(ResponseStatusException.class)
     @ResponseStatus
     public Map<String, String> handleResponseStatus(ResponseStatusException ex) {
-        HttpStatus status = HttpStatus.valueOf(ex.getStatusCode().value());
+        HttpStatus status = HttpStatus.valueOf(ex.getStatus().value());
         return Map.of("error", ex.getReason() == null ? status.getReasonPhrase() : ex.getReason());
     }
 

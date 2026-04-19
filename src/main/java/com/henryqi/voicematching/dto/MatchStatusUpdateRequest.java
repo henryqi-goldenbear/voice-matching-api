@@ -1,12 +1,13 @@
 package com.henryqi.voicematching.dto;
 
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
 public class MatchStatusUpdateRequest {
-    private String status;
+	private String status;
+
+	public MatchStatusUpdateRequest() {}
+
+	public MatchStatusUpdateRequest(String status) { this.status = status; }
+
+	public String getStatus() { return status; }
+	public String status() { return status; }
+	public void setStatus(String status) { this.status = status; }
 }

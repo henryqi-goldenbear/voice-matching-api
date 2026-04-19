@@ -1,6 +1,7 @@
 package com.henryqi.voicematching.model;
 
 import org.springframework.data.annotation.Id;
+import org.springframework.data.relational.core.mapping.Column;
 import org.springframework.data.relational.core.mapping.Table;
 
 import java.time.OffsetDateTime;
@@ -10,10 +11,16 @@ public class Profile {
     @Id
     private Long id;
     private String name;
+    @Column("current_emotional_state")
     private String currentEmotionalState;
+    @Column("current_life_chapter")
     private String currentLifeChapter;
+    @Column("current_social_energy")
     private String currentSocialEnergy;
+    @Column("last_check_in")
     private OffsetDateTime lastCheckIn;
+
+    public Profile() {}
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
