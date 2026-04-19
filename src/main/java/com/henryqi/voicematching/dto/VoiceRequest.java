@@ -1,7 +1,14 @@
 package com.henryqi.voicematching.dto;
 
-public record VoiceRequest(
-        Long profileId,
-        String voiceAudioBase64,
-        String transcript
-) {}
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class VoiceRequest {
+    private Long profileId;
+    private String voiceAudioBase64;
+    private String transcript;
+}
